@@ -376,3 +376,65 @@
             { prize-amount: (/ (* new-total-prize u20) u100), claimed: false })))
       
       (ok net-contribution))))
+
+;; HELPER FUNCTIONS: Supporting utilities for tournament operations
+(define-private (calculate-remaining-participants (tournament-id uint) (round-number uint))
+  (let ((total-participants (get current-participants (unwrap-panic (map-get? tournaments { tournament-id: tournament-id })))))
+    (/ total-participants (pow u2 (- round-number u1)))))
+
+(define-private (generate-round-matches (tournament-id uint) (round-number uint))
+  (let ((participants-remaining (calculate-remaining-participants tournament-id round-number)))
+    (if (< participants-remaining u2)
+      err-insufficient-entry-fee
+      (begin
+        ;; Create matches for remaining participants
+        ;; This is a simplified implementation - real implementation would need proper pairing logic
+        (let ((matches-to-create (/ participants-remaining u2)))
+          (if (> matches-to-create u0)
+            (ok matches-to-create)
+            err-match-not-ready))))))
+
+(define-private (calculate-new-average-placement (current-avg uint) (games-played uint) (new-placement uint))
+  (if (is-eq games-played u0)
+    new-placement
+    (/ (+ (* current-avg games-played) new-placement) (+ games-played u1))))
+
+(define-private (update-finalist-stats (tournament-id uint) (position uint))
+  (let ((prize-info (map-get? prize-distribution { tournament-id: tournament-id, position: position })))
+    (match prize-info
+      prize-data true
+      false)))
+
+(define-private (calculate-tournament-rounds (participants uint))
+  (if (<= participants u2) u1
+    (if (<= participants u4) u2
+      (if (<= participants u8) u3
+        (if (<= participants u16) u4 u5)))))
+
+;; READ-ONLY FUNCTIONS: Data access and query functions
+(define-read-only (get-tournament-info (tournament-id uint))
+  (map-get? tournaments { tournament-id: tournament-id }))
+
+(define-read-only (get-participant-info (tournament-id uint) (player principal))
+  (map-get? tournament-participants { tournament-id: tournament-id, player: player }))
+
+(define-read-only (get-match-info (match-id uint))
+  (map-get? tournament-matches { match-id: match-id }))
+
+(define-read-only (get-prize-info (tournament-id uint) (position uint))
+  (map-get? prize-distribution { tournament-id: tournament-id, position: position }))
+
+(define-read-only (get-bracket-info (tournament-id uint))
+  (map-get? tournament-brackets { tournament-id: tournament-id }))
+
+(define-read-only (get-round-schedule (tournament-id uint) (round-number uint))
+  (map-get? round-schedules { tournament-id: tournament-id, round-number: round-number }))
+
+(define-read-only (get-player-stats (player principal))
+  (map-get? player-statistics { player: player }))
+
+(define-read-only (get-sponsor-info (tournament-id uint) (sponsor principal))
+  (map-get? sponsor-contributions { tournament-id: tournament-id, sponsor: sponsor }))
+
+(define-read-only (get-platform-fee-rate)
+  (var-get platform-fee-rate))
