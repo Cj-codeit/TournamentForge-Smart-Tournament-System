@@ -102,7 +102,7 @@
     contribution-time: uint
   })
 
-  (define-public (create-tournament
+(define-public (create-tournament
   (tournament-name (string-ascii 50))
   (game-title (string-ascii 50))
   (max-participants uint)
@@ -206,7 +206,10 @@
             { prize-amount: (/ (* total-prize u50) u100), claimed: false })
           (map-set prize-distribution { tournament-id: tournament-id, position: u2 }
             { prize-amount: (/ (* total-prize u30) u100), claimed: false })
-          (map
+          (map-set prize-distribution { tournament-id: tournament-id, position: u3 }
+            { prize-amount: (/ (* total-prize u20) u100), claimed: false })))
+      
+      (ok true))))
 
 (define-public (submit-match-result (match-id uint) (winner principal))
   (let 
