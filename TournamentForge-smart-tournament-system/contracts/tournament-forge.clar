@@ -207,3 +207,172 @@
           (map-set prize-distribution { tournament-id: tournament-id, position: u2 }
             { prize-amount: (/ (* total-prize u30) u100), claimed: false })
           (map
+
+(define-public (submit-match-result (match-id uint) (winner principal))
+  (let 
+    ((match-info (unwrap! (map-get? tournament-matches { match-id: match-id }) err-tournament-not-found))
+     (tournament-info (unwrap! (map-get? tournaments { tournament-id: (get tournament-id match-info) }) err-tournament-not-found)))
+    (begin
+      (asserts! (is-eq tx-sender (get organizer tournament-info)) err-unauthorized)
+      (asserts! (not (get result-submitted match-info)) err-invalid-result)
+      (asserts! (or (is-eq winner (get player1 match-info)) (is-eq winner (get player2 match-info))) err-invalid-result)
+      
+      ;; Update match result
+      (map-set tournament-matches { match-id: match-id }
+        (merge match-info {
+          winner: (some winner),
+          match-status: "completed",
+          result-submitted: true
+        }))
+      
+      ;; Eliminate loser
+      (let ((loser (if (is-eq winner (get player1 match-info)) (get player2 match-info) (get player1 match-info))))
+        (map-set tournament-participants 
+          { tournament-id: (get tournament-id match-info), player: loser }
+          (merge 
+            (unwrap-panic (map-get? tournament-participants { tournament-id: (get tournament-id match-info), player: loser }))
+            { is-eliminated: true })))
+      
+      (ok true))))
+
+(define-public (claim-prize (tournament-id uint) (position uint))
+  (let 
+    ((tournament-info (unwrap! (map-get? tournaments { tournament-id: tournament-id }) err-tournament-not-found))
+     (prize-info (unwrap! (map-get? prize-distribution { tournament-id: tournament-id, position: position }) err-tournament-not-found))
+     (participant-info (unwrap! (map-get? tournament-participants { tournament-id: tournament-id, player: tx-sender }) err-not-registered)))
+    (begin
+      (asserts! (is-eq (get status tournament-info) "completed") err-tournament-started)
+      (asserts! (is-eq (get final-position participant-info) position) err-unauthorized)
+      (asserts! (not (get claimed prize-info)) err-invalid-result)
+      
+      ;; Transfer prize
+      (try! (ft-transfer? prize-token (get prize-amount prize-info) (get organizer tournament-info) tx-sender))
+      
+      ;; Mark as claimed
+      (map-set prize-distribution { tournament-id: tournament-id, position: position }
+        (merge prize-info { claimed: true }))
+      
+      (ok (get prize-amount prize-info)))))
+
+;; ADVANCED ROUND MANAGEMENT: Enhanced round scheduling and match generation
+(define-public (schedule-tournament-round 
+  (tournament-id uint) 
+  (round-number uint) 
+  (start-time uint) 
+  (duration-minutes uint))
+  (let 
+    ((tournament-info (unwrap! (map-get? tournaments { tournament-id: tournament-id }) err-tournament-not-found))
+     (bracket-info (unwrap! (map-get? tournament-brackets { tournament-id: tournament-id }) err-tournament-not-found))
+     (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1)))))
+    (begin
+      (asserts! (is-eq tx-sender (get organizer tournament-info)) err-unauthorized)
+      (asserts! (is-eq (get status tournament-info) "active") err-tournament-started)
+      (asserts! (<= round-number (get total-rounds bracket-info)) err-invalid-round)
+      (asserts! (>= start-time current-time) err-invalid-result)
+      
+      ;; Calculate total matches for this round
+      (let ((participants-remaining (calculate-remaining-participants tournament-id round-number))
+            (matches-in-round (/ participants-remaining u2)))
+        (begin
+          ;; Schedule the round
+          (map-set round-schedules { tournament-id: tournament-id, round-number: round-number }
+            {
+              scheduled-start-time: start-time,
+              duration-minutes: duration-minutes,
+              matches-completed: u0,
+              total-matches: matches-in-round,
+              round-status: "scheduled"
+            })
+          
+          ;; Generate matches for the round - now properly implemented
+          (let ((match-generation-result (generate-round-matches tournament-id round-number)))
+            (asserts! (is-ok match-generation-result) err-match-not-ready))
+          
+          ;; Update bracket current round if this is the next round
+          (if (is-eq round-number (+ (get current-round bracket-info) u1))
+            (map-set tournament-brackets { tournament-id: tournament-id }
+              (merge bracket-info { current-round: round-number }))
+            true)
+          
+          (ok matches-in-round))))))
+
+;; PLAYER STATISTICS: Comprehensive tracking and leaderboard management
+(define-public (update-player-statistics (tournament-id uint))
+  (let 
+    ((tournament-info (unwrap! (map-get? tournaments { tournament-id: tournament-id }) err-tournament-not-found))
+     (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1)))))
+    (begin
+      (asserts! (is-eq (get status tournament-info) "completed") err-tournament-started)
+      (asserts! (is-eq tx-sender (get organizer tournament-info)) err-unauthorized)
+      
+      ;; Update statistics for winner
+      (match (get winner tournament-info)
+        winner-principal (begin
+          (let ((current-stats (default-to 
+                  { tournaments-played: u0, tournaments-won: u0, total-earnings: u0, win-rate: u0, average-placement: u0 }
+                  (map-get? player-statistics { player: winner-principal })))
+                (winner-prize (get prize-amount (unwrap! (map-get? prize-distribution { tournament-id: tournament-id, position: u1 }) err-tournament-not-found))))
+            (begin
+              (map-set player-statistics { player: winner-principal }
+                {
+                  tournaments-played: (+ (get tournaments-played current-stats) u1),
+                  tournaments-won: (+ (get tournaments-won current-stats) u1),
+                  total-earnings: (+ (get total-earnings current-stats) winner-prize),
+                  win-rate: (/ (* (+ (get tournaments-won current-stats) u1) u100) (+ (get tournaments-played current-stats) u1)),
+                  average-placement: (calculate-new-average-placement (get average-placement current-stats) (get tournaments-played current-stats) u1)
+                })
+              
+              ;; Update runner-up statistics
+              (update-finalist-stats tournament-id u2)
+              
+              ;; Update third place statistics  
+              (update-finalist-stats tournament-id u3)
+              
+              (ok true))))
+        (ok false)))))
+
+;; SPONSORSHIP SYSTEM: Enhanced prize pools and sponsor management
+(define-public (add-sponsor-contribution 
+  (tournament-id uint) 
+  (contribution-amount uint) 
+  (sponsor-benefits (string-ascii 100)))
+  (let 
+    ((tournament-info (unwrap! (map-get? tournaments { tournament-id: tournament-id }) err-tournament-not-found))
+     (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+     (platform-fee (/ (* contribution-amount (var-get platform-fee-rate)) u100))
+     (net-contribution (- contribution-amount platform-fee)))
+    (begin
+      (asserts! (or (is-eq (get status tournament-info) "registration") 
+                   (is-eq (get status tournament-info) "active")) err-tournament-started)
+      
+      ;; Transfer sponsorship amount
+      (try! (ft-transfer? prize-token contribution-amount tx-sender (get organizer tournament-info)))
+      
+      ;; Transfer platform fee to contract owner
+      (try! (ft-transfer? prize-token platform-fee (get organizer tournament-info) contract-owner))
+      
+      ;; Record sponsorship
+      (map-set sponsor-contributions { tournament-id: tournament-id, sponsor: tx-sender }
+        {
+          contribution-amount: contribution-amount,
+          sponsor-benefits: sponsor-benefits,
+          contribution-time: current-time
+        })
+      
+      ;; Update tournament prize pool
+      (map-set tournaments { tournament-id: tournament-id }
+        (merge tournament-info { 
+          total-prize-pool: (+ (get total-prize-pool tournament-info) net-contribution) 
+        }))
+      
+      ;; Recalculate prize distribution with enhanced pool
+      (let ((new-total-prize (+ (get total-prize-pool tournament-info) net-contribution)))
+        (begin
+          (map-set prize-distribution { tournament-id: tournament-id, position: u1 }
+            { prize-amount: (/ (* new-total-prize u50) u100), claimed: false })
+          (map-set prize-distribution { tournament-id: tournament-id, position: u2 }
+            { prize-amount: (/ (* new-total-prize u30) u100), claimed: false })
+          (map-set prize-distribution { tournament-id: tournament-id, position: u3 }
+            { prize-amount: (/ (* new-total-prize u20) u100), claimed: false })))
+      
+      (ok net-contribution))))
